@@ -1,16 +1,25 @@
 {
     "layout": {
         "type": "layout",
-        "pages": ["general"],
+        "pages": [
+            "general"
+        ],
         "general": {
             "type": "page",
             "title": "General",
-            "sections": ["command"]
+            "sections": [
+                "command"
+            ]
         },
         "command": {
             "type": "section",
             "title": "CodexBar",
-            "keys": ["command-path", "provider", "refresh-interval"]
+            "keys": [
+                "command-path",
+                "provider",
+                "refresh-interval",
+                "time-format"
+            ]
         }
     },
     "command-path": {
@@ -38,5 +47,16 @@
         "step": 15,
         "units": "seconds",
         "description": "Refresh interval"
+    },
+    "time-format": {
+        "type": "combobox",
+        "default": "system",
+        "description": "Time format",
+        "tooltip": "Follow system uses the clock format from Date & Time settings.",
+        "options": {
+            "Follow system": "system",
+            "24-hour": "24h",
+            "12-hour": "12h"
+        }
     }
 }
