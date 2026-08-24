@@ -128,8 +128,21 @@ class CodexBarApplet extends Applet.TextIconApplet {
         this._scheduleRefresh();
     }
 
+    // hide_applet_icon() only empties the icon bin, and Cinnamon adds both that bin
+    // and the label bin to the same box as the gauge. .applet-box carries
+    // `spacing: 5px`, which is charged between *visible* children regardless of their
+    // width, so each empty bin left showing costs a full gap of dead space to the
+    // left of the gauge and pushes it off the centre of the applet.
+    //
+    // The label needs set_applet_label("") rather than a bare hide: setOrientation()
+    // re-runs set_applet_label(this._applet_label.get_text()), and on a label whose
+    // text was never assigned that reads back as null, which fails Cinnamon's
+    // `text == ""` check and takes the *show* branch. Assigning "" once makes every
+    // later call hide the bin on its own.
     _applyIconPreference() {
         this.hide_applet_icon();
+        this._applet_icon_box.hide();
+        this.set_applet_label("");
     }
 
     _setLoadingState() {
