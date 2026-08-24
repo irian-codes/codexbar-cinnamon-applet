@@ -189,13 +189,18 @@ class CodexBarApplet extends Applet.TextIconApplet {
             || (visible.length > 0 ? visible[0] : null);
     }
 
-    // The panel gauge tracks one provider only. Returning null means the chosen one
-    // is gone, which the gauge renders as greyed rather than silently substituting.
+    // The panel gauge tracks one provider only, always named explicitly. Returning
+    // null means the chosen one is gone, which the gauge renders as greyed rather
+    // than silently substituting whichever provider CodexBar happened to list first.
     _gaugeRecord(visible) {
-        if (!this.gaugeProvider) {
-            return visible.length > 0 ? visible[0] : null;
-        }
-        return this._recordForProvider(visible, this.gaugeProvider);
+        return this._recordForProvider(visible, this._gaugeProviderKey());
+    }
+
+    // Settings can still hold the empty value written by older versions of the
+    // schema, which offered a "first available" entry. _doUpgrade migrates it on the
+    // next launch; until then, fall back rather than matching no provider at all.
+    _gaugeProviderKey() {
+        return this.gaugeProvider || DEFAULT_PROVIDER;
     }
 
     // Keep the provider checklist and the gauge dropdown in step with whatever
@@ -224,11 +229,18 @@ class CodexBarApplet extends Applet.TextIconApplet {
             this.settings.setValue("providers", next);
         }
 
-        let options = { "First available": "" };
+        let options = {};
         for (let i = 0; i < records.length; i++) {
             options[this._providerLabel(records[i])] = this._providerKey(records[i]);
         }
 
+        // These options only ever reach the config file. Cinnamon's _doUpgrade runs
+        // _checkSanity against settings-schema.json instead, and for a combobox that
+        // means any value missing from the *schema's* options is discarded back to the
+        // default on the next schema change. So the schema seeds the known provider
+        // keys as well; without that, editing settings-schema.json silently resets the
+        // gauge provider.
+        //
         // Settings.setOptions compares with != on objects, which is always true for a
         // fresh literal, and every call rewrites the whole settings file synchronously.
         // Only call it when the options really changed.
@@ -256,8 +268,10 @@ class CodexBarApplet extends Applet.TextIconApplet {
         let model = this._modelFromRecords(active ? [active] : []);
         this.lastError = model.error;
 
-        if (!gaugeRecord && this.gaugeProvider) {
-            this.set_applet_tooltip("CodexBar: " + this._titleCase(this.gaugeProvider) + " unavailable");
+        // visible.length guards the pre-fetch case: with no records at all the gauge
+        // provider is not missing, we simply have nothing yet.
+        if (!gaugeRecord && visible.length > 0) {
+            this.set_applet_tooltip("CodexBar: " + this._titleCase(this._gaugeProviderKey()) + " unavailable");
         } else if (gaugeRecord && gaugeRecord !== active) {
             let gaugeModel = this._modelFromRecords([gaugeRecord]);
             this.set_applet_tooltip(gaugeModel.tooltip);

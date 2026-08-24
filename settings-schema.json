@@ -90,11 +90,14 @@
     },
     "gauge-provider": {
         "type": "combobox",
-        "default": "",
+        "default": "codex",
         "description": "Provider for the gauge when minimized",
-        "tooltip": "Which provider the panel gauge tracks. The list fills in automatically once usage has been fetched.",
+        "tooltip": "Which provider the panel gauge tracks. The list narrows to the providers CodexBar actually returned once usage has been fetched.",
         "options": {
-            "First available": ""
+            "Codex": "codex",
+            "OpenAI": "openai",
+            "Claude": "claude",
+            "Gemini": "gemini"
         }
     },
     "time-format": {
