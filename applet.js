@@ -301,7 +301,7 @@ class CodexBarApplet extends Applet.TextIconApplet {
     _refresh(manual) {
         if (this.refreshing) {
             if (manual && this.menu.isOpen) {
-                this._buildMenu();
+                this._buildBody();
             }
             return;
         }
@@ -309,7 +309,7 @@ class CodexBarApplet extends Applet.TextIconApplet {
         this.refreshing = true;
         this.set_applet_tooltip("CodexBar: refreshing");
         if (this.menu.isOpen) {
-            this._buildMenu();
+            this._buildBody();
         }
 
         try {
@@ -359,8 +359,13 @@ class CodexBarApplet extends Applet.TextIconApplet {
         return argv;
     }
 
+    _menuTarget() {
+        return this._bodyTarget || this.menu;
+    }
+
     _buildMenu() {
         this.menu.removeAll();
+        this.tabButtons = {};
 
         let visible = this._visibleRecords();
         if (visible.length > 1) {
@@ -368,31 +373,52 @@ class CodexBarApplet extends Applet.TextIconApplet {
             this._addSectionSeparator();
         }
 
-        let model = this._modelFromRecords(visible.length > 0 ? [this._activeRecord(visible)] : []);
-        this._addHeader(model);
-
-        if (model.error) {
-            this._addMessage(model.error, "codexbar-error");
-        } else if (model.rows.length === 0) {
-            this._addMessage("No usage data returned yet.", "codexbar-muted");
-        } else {
-            for (let i = 0; i < model.rows.length; i++) {
-                this._addUsageRow(model.rows[i]);
-            }
-        }
-
-        if (model.extraUsage) {
-            this._addSectionSeparator();
-            this._addUsageRow(model.extraUsage);
-        }
-
-        if (model.costLines.length > 0) {
-            this._addSectionSeparator();
-            this._addCostSection(model.costLines);
-        }
+        this.bodySection = new PopupMenu.PopupMenuSection();
+        this.menu.addMenuItem(this.bodySection);
+        this._buildBody();
 
         this._addSectionSeparator();
         this._addActions();
+    }
+
+    // Rebuilds only the section below the tabs. Switching tabs and refreshing both
+    // go through here, so the actor being clicked is never destroyed mid-click,
+    // which is what previously collapsed the menu.
+    _buildBody() {
+        if (!this.bodySection) {
+            return;
+        }
+
+        this.bodySection.removeAll();
+        this._bodyTarget = this.bodySection;
+
+        try {
+            let visible = this._visibleRecords();
+            let model = this._modelFromRecords(visible.length > 0 ? [this._activeRecord(visible)] : []);
+            this._addHeader(model);
+
+            if (model.error) {
+                this._addMessage(model.error, "codexbar-error");
+            } else if (model.rows.length === 0) {
+                this._addMessage("No usage data returned yet.", "codexbar-muted");
+            } else {
+                for (let i = 0; i < model.rows.length; i++) {
+                    this._addUsageRow(model.rows[i]);
+                }
+            }
+
+            if (model.extraUsage) {
+                this._addSectionSeparator();
+                this._addUsageRow(model.extraUsage);
+            }
+
+            if (model.costLines.length > 0) {
+                this._addSectionSeparator();
+                this._addCostSection(model.costLines);
+            }
+        } finally {
+            this._bodyTarget = null;
+        }
     }
 
     _addTabs(visible) {
@@ -409,18 +435,35 @@ class CodexBarApplet extends Applet.TextIconApplet {
             });
 
             button.connect("clicked", Lang.bind(this, function() {
-                if (this.activeProvider !== key) {
-                    this.activeProvider = key;
-                    this._buildMenu();
-                }
+                this._setActiveProvider(key);
                 return true;
             }));
 
+            // Keep the press from reaching the menu, which would treat it as an
+            // activation and close.
+            button.connect("button-press-event", function() { return true; });
+            button.connect("button-release-event", function() { return true; });
+
+            this.tabButtons[key] = button;
             box.add_actor(button);
         }
 
         item.addActor(box, { span: -1, expand: true });
-        this.menu.addMenuItem(item);
+        this._menuTarget().addMenuItem(item);
+    }
+
+    _setActiveProvider(key) {
+        if (this.activeProvider === key) {
+            return;
+        }
+
+        this.activeProvider = key;
+
+        for (let other in this.tabButtons) {
+            this.tabButtons[other].set_style_class_name(other === key ? "codexbar-tab-active" : "codexbar-tab");
+        }
+
+        this._buildBody();
     }
 
     _addHeader(model) {
@@ -436,7 +479,7 @@ class CodexBarApplet extends Applet.TextIconApplet {
         box.add_actor(top);
         box.add_actor(new St.Label({ text: model.subtitle, style_class: "codexbar-subtitle" }));
         item.addActor(box, { span: -1, expand: true });
-        this.menu.addMenuItem(item);
+        this._menuTarget().addMenuItem(item);
     }
 
     _addUsageRow(row) {
@@ -468,7 +511,7 @@ class CodexBarApplet extends Applet.TextIconApplet {
         }
 
         item.addActor(box, { span: -1, expand: true });
-        this.menu.addMenuItem(item);
+        this._menuTarget().addMenuItem(item);
     }
 
     _progressBar(percent) {
@@ -503,11 +546,16 @@ class CodexBarApplet extends Applet.TextIconApplet {
         }
 
         item.addActor(box, { span: -1, expand: true });
-        this.menu.addMenuItem(item);
+        this._menuTarget().addMenuItem(item);
     }
 
     _addActions() {
         let refreshItem = new PopupMenu.PopupIconMenuItem("Refresh now", "view-refresh", St.IconType.SYMBOLIC);
+        // PopupBaseMenuItem._onButtonReleaseEvent activates with keepMenu false, and
+        // PopupMenu closes on any activation that is not explicitly marked otherwise.
+        refreshItem.activate = function(event) {
+            refreshItem.emit("activate", event, true);
+        };
         refreshItem.connect("activate", Lang.bind(this, this._onRefreshClicked));
         this.menu.addMenuItem(refreshItem);
 
@@ -522,11 +570,11 @@ class CodexBarApplet extends Applet.TextIconApplet {
         let item = new PopupMenu.PopupMenuItem(text, { reactive: false });
         item.label.add_style_class_name(styleClass);
         item.label.clutter_text.line_wrap = true;
-        this.menu.addMenuItem(item);
+        this._menuTarget().addMenuItem(item);
     }
 
     _addSectionSeparator() {
-        this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+        this._menuTarget().addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
     }
 
     _modelFromRecords(records) {
