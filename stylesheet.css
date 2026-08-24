@@ -1,8 +1,8 @@
+/* No horizontal margin: .applet-box already pads 5px either side, and an uneven
+   margin here shifts the gauge off the centre of the applet. */
 .codexbar-panel-gauge {
     width: 42px;
     height: 24px;
-    margin-left: 3px;
-    margin-right: 1px;
 }
 
 .codexbar-popup-item {
