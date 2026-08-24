@@ -8,7 +8,8 @@
             "type": "page",
             "title": "General",
             "sections": [
-                "command"
+                "command",
+                "display"
             ]
         },
         "command": {
@@ -17,7 +18,16 @@
             "keys": [
                 "command-path",
                 "provider",
-                "refresh-interval",
+                "source",
+                "refresh-interval"
+            ]
+        },
+        "display": {
+            "type": "section",
+            "title": "Display",
+            "keys": [
+                "providers",
+                "gauge-provider",
                 "time-format"
             ]
         }
@@ -32,11 +42,23 @@
         "default": "codex",
         "description": "Provider",
         "options": {
+            "Enabled providers": "enabled",
             "Codex": "codex",
             "OpenAI": "openai",
             "Claude": "claude",
-            "Gemini": "gemini",
-            "All": "all"
+            "Gemini": "gemini"
+        }
+    },
+    "source": {
+        "type": "combobox",
+        "default": "auto",
+        "description": "Data source",
+        "tooltip": "Auto follows CodexBar's own fallback order. OAuth is much faster for Claude but is not offered by every provider.",
+        "options": {
+            "Auto": "auto",
+            "OAuth": "oauth",
+            "Web": "web",
+            "CLI": "cli"
         }
     },
     "refresh-interval": {
@@ -47,6 +69,33 @@
         "step": 15,
         "units": "seconds",
         "description": "Refresh interval"
+    },
+    "providers": {
+        "type": "list",
+        "description": "Providers to show",
+        "tooltip": "Filled in automatically from the providers enabled in CodexBar. Untick to hide a provider's tab.",
+        "columns": [
+            {
+                "id": "provider",
+                "title": "Provider",
+                "type": "string"
+            },
+            {
+                "id": "show",
+                "title": "Show",
+                "type": "boolean"
+            }
+        ],
+        "default": []
+    },
+    "gauge-provider": {
+        "type": "combobox",
+        "default": "",
+        "description": "Provider for the gauge when minimized",
+        "tooltip": "Which provider the panel gauge tracks. The list fills in automatically once usage has been fetched.",
+        "options": {
+            "First available": ""
+        }
     },
     "time-format": {
         "type": "combobox",

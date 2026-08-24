@@ -51,3 +51,33 @@
     border-radius: 4px;
     background-color: #42c6a3;
 }
+
+.codexbar-tabs {
+    width: 280px;
+    spacing: 4px;
+    padding: 2px 0;
+}
+
+.codexbar-tab,
+.codexbar-tab-active {
+    padding: 4px 10px;
+    border-radius: 4px;
+    text-align: center;
+    font-weight: bold;
+}
+
+.codexbar-tab {
+    color: rgba(255, 255, 255, 0.55);
+    background-color: rgba(255, 255, 255, 0.06);
+}
+
+.codexbar-tab:hover {
+    color: rgba(255, 255, 255, 0.85);
+    background-color: rgba(255, 255, 255, 0.12);
+}
+
+.codexbar-tab-active {
+    color: #ffffff;
+    background-color: rgba(77, 222, 116, 0.22);
+    border: 1px solid rgba(77, 222, 116, 0.55);
+}

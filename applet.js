@@ -11,6 +11,7 @@ const Gio = imports.gi.Gio;
 
 const DEFAULT_COMMAND = "/opt/apps/codexbar/codexbar";
 const DEFAULT_PROVIDER = "codex";
+const ENABLED_PROVIDERS = "enabled";
 const DEFAULT_REFRESH_SECONDS = 60;
 const CLOCK_SCHEMA = "org.cinnamon.desktop.interface";
 const CLOCK_KEY = "clock-use-24h";
@@ -34,6 +35,7 @@ class CodexBarApplet extends Applet.TextIconApplet {
         this.lastUpdated = null;
         this.lastError = null;
         this.records = [];
+        this.activeProvider = "";
         this.panelPercent = 0;
         this.panelGaugeMode = "loading";
 
@@ -48,6 +50,12 @@ class CodexBarApplet extends Applet.TextIconApplet {
         this.settings.bind("provider", "provider", this._onSettingsChanged);
         this.settings.bind("refresh-interval", "refreshInterval", this._onSettingsChanged);
         this.settings.bind("time-format", "timeFormat", this._onSettingsChanged);
+        this.settings.bind("source", "source", this._onSettingsChanged);
+        // Display-only settings: re-render from the records we already have rather
+        // than refetching, and crucially avoid the write/refresh loop that a full
+        // _onSettingsChanged would cause when _syncProviderSettings writes back.
+        this.settings.bind("providers", "providerRows", this._onDisplaySettingsChanged);
+        this.settings.bind("gauge-provider", "gaugeProvider", this._onDisplaySettingsChanged);
 
         this._watchSystemClockFormat();
 
@@ -91,11 +99,121 @@ class CodexBarApplet extends Applet.TextIconApplet {
     _setRecords(records) {
         this.records = records || [];
         this.lastUpdated = new Date();
+        this._syncProviderSettings();
+        this._applyRecords();
+    }
 
-        let model = this._modelFromRecords(this.records);
+    _onDisplaySettingsChanged() {
+        this._applyRecords();
+    }
+
+    _providerKey(record) {
+        return record && record.provider ? String(record.provider) : "";
+    }
+
+    _providerLabel(record) {
+        let key = this._providerKey(record);
+        return key ? this._titleCase(key) : "Codex";
+    }
+
+    // Providers the user has left ticked. Anything not yet in the list is shown,
+    // so a newly enabled provider appears without needing to be ticked first.
+    _visibleRecords() {
+        let hidden = {};
+        let rows = this.providerRows || [];
+        for (let i = 0; i < rows.length; i++) {
+            if (rows[i] && rows[i].show === false) {
+                hidden[rows[i].provider] = true;
+            }
+        }
+
+        return (this.records || []).filter(Lang.bind(this, function(record) {
+            return !hidden[this._providerKey(record)];
+        }));
+    }
+
+    _recordForProvider(records, key) {
+        for (let i = 0; i < records.length; i++) {
+            if (this._providerKey(records[i]) === key) {
+                return records[i];
+            }
+        }
+        return null;
+    }
+
+    _activeRecord(visible) {
+        return this._recordForProvider(visible, this.activeProvider)
+            || (visible.length > 0 ? visible[0] : null);
+    }
+
+    // The panel gauge tracks one provider only. Returning null means the chosen one
+    // is gone, which the gauge renders as greyed rather than silently substituting.
+    _gaugeRecord(visible) {
+        if (!this.gaugeProvider) {
+            return visible.length > 0 ? visible[0] : null;
+        }
+        return this._recordForProvider(visible, this.gaugeProvider);
+    }
+
+    // Keep the provider checklist and the gauge dropdown in step with whatever
+    // CodexBar actually returned, so neither needs a hardcoded provider list.
+    _syncProviderSettings() {
+        let records = this.records || [];
+        if (records.length === 0) {
+            return;
+        }
+
+        let previous = {};
+        let rows = this.providerRows || [];
+        for (let i = 0; i < rows.length; i++) {
+            if (rows[i]) {
+                previous[rows[i].provider] = rows[i].show !== false;
+            }
+        }
+
+        let next = records.map(Lang.bind(this, function(record) {
+            let key = this._providerKey(record);
+            return { provider: key, show: key in previous ? previous[key] : true };
+        }));
+
+        if (JSON.stringify(next) !== JSON.stringify(rows)) {
+            this.providerRows = next;
+            this.settings.setValue("providers", next);
+        }
+
+        let options = { "First available": "" };
+        for (let i = 0; i < records.length; i++) {
+            options[this._providerLabel(records[i])] = this._providerKey(records[i]);
+        }
+        this.settings.setOptions("gauge-provider", options);
+    }
+
+    _applyRecords() {
+        let visible = this._visibleRecords();
+        let active = this._activeRecord(visible);
+        this.activeProvider = this._providerKey(active);
+
+        let gaugeRecord = this._gaugeRecord(visible);
+        if (!gaugeRecord) {
+            this._setPanelGauge(0, "unavailable");
+        } else if (gaugeRecord.error) {
+            this._setPanelGauge(100, "error");
+        } else {
+            this._setPanelGauge(this._gaugeLimitPercent(gaugeRecord), "normal");
+        }
+
+        let model = this._modelFromRecords(active ? [active] : []);
         this.lastError = model.error;
-        this._setPanelGauge(model.gaugePercent, model.error ? "error" : "normal");
-        this.set_applet_tooltip(model.tooltip);
+
+        if (!gaugeRecord && this.gaugeProvider) {
+            this.set_applet_tooltip("CodexBar: " + this._titleCase(this.gaugeProvider) + " unavailable");
+        } else if (gaugeRecord && gaugeRecord !== active) {
+            let gaugeModel = this._modelFromRecords([gaugeRecord]);
+            this.set_applet_tooltip(gaugeModel.tooltip);
+        } else {
+            this.set_applet_tooltip(model.tooltip);
+        }
+
         this._buildMenu();
     }
 
@@ -130,6 +248,13 @@ class CodexBarApplet extends Applet.TextIconApplet {
         cr.arc(cx, cy, radius, start, end);
         cr.setSourceRGBA(1, 1, 1, 0.18);
         cr.stroke();
+
+        if (this.panelGaugeMode === "unavailable") {
+            // Chosen gauge provider is missing: leave the track bare rather than
+            // showing another provider's number under the wrong label.
+            cr.$dispose();
+            return;
+        }
 
         if (this.panelGaugeMode === "error") {
             cr.setSourceRGBA(0.95, 0.22, 0.18, 1);
@@ -209,14 +334,7 @@ class CodexBarApplet extends Applet.TextIconApplet {
                     this._scheduleRefresh();
                 }
             }), {
-                argv: [
-                this.commandPath || DEFAULT_COMMAND,
-                "usage",
-                "--format",
-                "json",
-                "--provider",
-                this.provider || DEFAULT_PROVIDER
-                ]
+                argv: this._usageArgv()
             });
         } catch (e) {
             this.refreshing = false;
@@ -224,10 +342,33 @@ class CodexBarApplet extends Applet.TextIconApplet {
         }
     }
 
+    // Omitting --provider makes CodexBar return exactly the providers enabled in its
+    // own config, which is the only way to get more than one record from a single run.
+    _usageArgv() {
+        let argv = [this.commandPath || DEFAULT_COMMAND, "usage", "--format", "json"];
+        let provider = this.provider || DEFAULT_PROVIDER;
+
+        if (provider !== ENABLED_PROVIDERS) {
+            argv.push("--provider", provider);
+        }
+
+        if (this.source && this.source !== "auto") {
+            argv.push("--source", this.source);
+        }
+
+        return argv;
+    }
+
     _buildMenu() {
         this.menu.removeAll();
 
-        let model = this._modelFromRecords(this.records);
+        let visible = this._visibleRecords();
+        if (visible.length > 1) {
+            this._addTabs(visible);
+            this._addSectionSeparator();
+        }
+
+        let model = this._modelFromRecords(visible.length > 0 ? [this._activeRecord(visible)] : []);
         this._addHeader(model);
 
         if (model.error) {
@@ -252,6 +393,34 @@ class CodexBarApplet extends Applet.TextIconApplet {
 
         this._addSectionSeparator();
         this._addActions();
+    }
+
+    _addTabs(visible) {
+        let item = new PopupMenu.PopupBaseMenuItem({ reactive: false, style_class: "codexbar-popup-item" });
+        let box = new St.BoxLayout({ vertical: false, style_class: "codexbar-tabs" });
+
+        for (let i = 0; i < visible.length; i++) {
+            let key = this._providerKey(visible[i]);
+            let active = key === this.activeProvider;
+            let button = new St.Button({
+                label: this._providerLabel(visible[i]),
+                style_class: active ? "codexbar-tab-active" : "codexbar-tab",
+                x_expand: true
+            });
+
+            button.connect("clicked", Lang.bind(this, function() {
+                if (this.activeProvider !== key) {
+                    this.activeProvider = key;
+                    this._buildMenu();
+                }
+                return true;
+            }));
+
+            box.add_actor(button);
+        }
+
+        item.addActor(box, { span: -1, expand: true });
+        this.menu.addMenuItem(item);
     }
 
     _addHeader(model) {
