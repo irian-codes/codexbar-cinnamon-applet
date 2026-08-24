@@ -439,11 +439,6 @@ class CodexBarApplet extends Applet.TextIconApplet {
                 return true;
             }));
 
-            // Keep the press from reaching the menu, which would treat it as an
-            // activation and close.
-            button.connect("button-press-event", function() { return true; });
-            button.connect("button-release-event", function() { return true; });
-
             this.tabButtons[key] = button;
             box.add_actor(button);
         }
