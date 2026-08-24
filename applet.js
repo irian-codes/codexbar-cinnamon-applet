@@ -7,10 +7,14 @@ const St = imports.gi.St;
 const Util = imports.misc.util;
 const AppletManager = imports.ui.appletManager;
 const Cairo = imports.cairo;
+const Gio = imports.gi.Gio;
 
 const DEFAULT_COMMAND = "/opt/apps/codexbar/codexbar";
 const DEFAULT_PROVIDER = "codex";
 const DEFAULT_REFRESH_SECONDS = 60;
+const CLOCK_SCHEMA = "org.cinnamon.desktop.interface";
+const CLOCK_KEY = "clock-use-24h";
+const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const PANEL_GAUGE_WIDTH = 28;
 const PANEL_GAUGE_HEIGHT = 16;
 
@@ -43,6 +47,9 @@ class CodexBarApplet extends Applet.TextIconApplet {
         this.settings.bind("command-path", "commandPath", this._onSettingsChanged);
         this.settings.bind("provider", "provider", this._onSettingsChanged);
         this.settings.bind("refresh-interval", "refreshInterval", this._onSettingsChanged);
+        this.settings.bind("time-format", "timeFormat", this._onSettingsChanged);
+
+        this._watchSystemClockFormat();
 
         this._setLoadingState();
         this._buildMenu();
@@ -57,6 +64,7 @@ class CodexBarApplet extends Applet.TextIconApplet {
 
     on_applet_removed_from_panel() {
         this._clearRefreshTimer();
+        this._unwatchSystemClockFormat();
         this.settings.finalize();
     }
 
@@ -476,15 +484,8 @@ class CodexBarApplet extends Applet.TextIconApplet {
 
     _limitRow(title, value) {
         let percent = this._firstNumber(value, ["usedPercent", "percentUsed", "usagePercent", "used_percent"]);
-        let resetDescription = this._firstValue(value, ["resetDescription"]);
         let reset = this._firstValue(value, ["resetsAt", "resetAt", "reset_at"]);
-        let right = "";
-
-        if (resetDescription) {
-            right = "Resets " + resetDescription;
-        } else if (reset) {
-            right = "Resets " + this._relativeTime(reset);
-        }
+        let right = this._resetLabel(value, reset);
 
         return {
             title: title,
@@ -507,7 +508,7 @@ class CodexBarApplet extends Applet.TextIconApplet {
             title: title,
             percent: percent || 0,
             detail: detail,
-            right: reset ? "Resets " + this._relativeTime(reset) : "",
+            right: this._resetLabel(value, reset),
             note: summary || this._paceNote(stage, delta)
         };
     }
@@ -695,6 +696,111 @@ class CodexBarApplet extends Applet.TextIconApplet {
         return text.charAt(0).toUpperCase() + text.slice(1);
     }
 
+    // Follow the desktop-wide clock preference (Date & Time settings) unless the
+    // applet's own setting overrides it. The schema is looked up defensively so a
+    // non-Cinnamon desktop falls back to 24h instead of throwing.
+    _watchSystemClockFormat() {
+        this.systemUses24h = true;
+        this.clockSettings = null;
+        this.clockSettingsId = 0;
+
+        try {
+            let source = Gio.SettingsSchemaSource.get_default();
+            if (!source || !source.lookup(CLOCK_SCHEMA, true)) {
+                return;
+            }
+
+            this.clockSettings = new Gio.Settings({ schema_id: CLOCK_SCHEMA });
+            this.systemUses24h = this.clockSettings.get_boolean(CLOCK_KEY);
+            this.clockSettingsId = this.clockSettings.connect("changed::" + CLOCK_KEY, Lang.bind(this, function() {
+                this.systemUses24h = this.clockSettings.get_boolean(CLOCK_KEY);
+                if (this.menu.isOpen) {
+                    this._buildMenu();
+                }
+            }));
+        } catch (e) {
+            global.logWarning("CodexBar: could not read " + CLOCK_SCHEMA + ": " + e.message);
+        }
+    }
+
+    _unwatchSystemClockFormat() {
+        if (this.clockSettings && this.clockSettingsId) {
+            this.clockSettings.disconnect(this.clockSettingsId);
+        }
+        this.clockSettings = null;
+        this.clockSettingsId = 0;
+    }
+
+    _uses24h() {
+        if (this.timeFormat === "12h") {
+            return false;
+        }
+        if (this.timeFormat === "24h") {
+            return true;
+        }
+        return this.systemUses24h !== false;
+    }
+
+    _pad2(number) {
+        return (number < 10 ? "0" : "") + number;
+    }
+
+    // Formatted by hand rather than through toLocaleTimeString, which follows LC_TIME
+    // and would ignore the desktop clock preference entirely.
+    _formatClock(date) {
+        let minutes = this._pad2(date.getMinutes());
+        if (this._uses24h()) {
+            return this._pad2(date.getHours()) + ":" + minutes;
+        }
+
+        let hours = date.getHours();
+        let suffix = hours < 12 ? "AM" : "PM";
+        hours = hours % 12;
+        if (hours === 0) {
+            hours = 12;
+        }
+
+        return hours + ":" + minutes + " " + suffix;
+    }
+
+    _sameDay(a, b) {
+        return a.getFullYear() === b.getFullYear()
+            && a.getMonth() === b.getMonth()
+            && a.getDate() === b.getDate();
+    }
+
+    _formatResetAt(value) {
+        let date = new Date(value);
+        if (isNaN(date.getTime())) {
+            return null;
+        }
+
+        let clock = this._formatClock(date);
+        if (this._sameDay(date, new Date())) {
+            return clock;
+        }
+
+        return MONTH_NAMES[date.getMonth()] + " " + date.getDate() + ", " + clock;
+    }
+
+    // CodexBar's resetDescription is unreliable: for Claude it arrives unspaced and
+    // already prefixed ("Resets9:10pm(Europe/Madrid)"). Prefer the ISO timestamp and
+    // only fall back to the description, de-duplicating its prefix when we do.
+    _resetLabel(value, reset) {
+        let absolute = reset ? this._formatResetAt(reset) : null;
+        if (absolute) {
+            return "Resets " + absolute;
+        }
+
+        let description = this._firstValue(value, ["resetDescription"]);
+        if (description) {
+            let text = String(description).trim();
+            return /^resets/i.test(text) ? text : "Resets " + text;
+        }
+
+        return reset ? "Resets " + this._relativeTime(reset) : "";
+    }
+
     _relativeUpdated(date) {
         if (!date) {
             return "soon";
@@ -707,11 +813,11 @@ class CodexBarApplet extends Applet.TextIconApplet {
         if (seconds < 3600) {
             return Math.floor(seconds / 60) + "m ago";
         }
-        return date.toLocaleTimeString();
+        return this._formatClock(date);
     }
 
     _formatUpdated(date) {
-        return date ? date.toLocaleTimeString() : "never";
+        return date ? this._formatClock(date) : "never";
     }
 
     _relativeTime(value) {
