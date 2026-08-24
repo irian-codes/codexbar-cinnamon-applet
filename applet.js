@@ -214,7 +214,14 @@ class CodexBarApplet extends Applet.TextIconApplet {
             this.set_applet_tooltip(model.tooltip);
         }
 
-        this._buildMenu();
+        // Tearing the menu down while it is open closes it, so only do a full
+        // rebuild when the tab strip itself has to change.
+        if (this.menu.isOpen && this.bodySection && this._tabsMatchShell(visible)) {
+            this._buildBody();
+            this._syncUpdatedLabel();
+        } else {
+            this._buildMenu();
+        }
     }
 
     _setErrorState(message) {
@@ -447,6 +454,38 @@ class CodexBarApplet extends Applet.TextIconApplet {
         this._menuTarget().addMenuItem(item);
     }
 
+    _expectedTabKeys(visible) {
+        if (visible.length <= 1) {
+            return [];
+        }
+        return visible.map(Lang.bind(this, function(record) {
+            return this._providerKey(record);
+        }));
+    }
+
+    _tabsMatchShell(visible) {
+        let expected = this._expectedTabKeys(visible);
+        let current = Object.keys(this.tabButtons || {});
+
+        if (expected.length !== current.length) {
+            return false;
+        }
+
+        for (let i = 0; i < expected.length; i++) {
+            if (current.indexOf(expected[i]) < 0) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    _syncUpdatedLabel() {
+        if (this.updatedItem && this.updatedItem.label) {
+            this.updatedItem.label.text = "Updated: " + this._formatUpdated(this.lastUpdated);
+        }
+    }
+
     _setActiveProvider(key) {
         if (this.activeProvider === key) {
             return;
@@ -554,7 +593,7 @@ class CodexBarApplet extends Applet.TextIconApplet {
         refreshItem.connect("activate", Lang.bind(this, this._onRefreshClicked));
         this.menu.addMenuItem(refreshItem);
 
-        this._addMessage("Updated: " + this._formatUpdated(this.lastUpdated), "codexbar-muted");
+        this.updatedItem = this._addMessage("Updated: " + this._formatUpdated(this.lastUpdated), "codexbar-muted");
     }
 
     _onRefreshClicked() {
@@ -566,6 +605,7 @@ class CodexBarApplet extends Applet.TextIconApplet {
         item.label.add_style_class_name(styleClass);
         item.label.clutter_text.line_wrap = true;
         this._menuTarget().addMenuItem(item);
+        return item;
     }
 
     _addSectionSeparator() {
