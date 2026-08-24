@@ -11,6 +11,7 @@ const Cairo = imports.cairo;
 const DEFAULT_COMMAND = "/opt/apps/codexbar/codexbar";
 const DEFAULT_PROVIDER = "codex";
 const DEFAULT_REFRESH_SECONDS = 60;
+const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const PANEL_GAUGE_WIDTH = 28;
 const PANEL_GAUGE_HEIGHT = 16;
 
@@ -476,15 +477,8 @@ class CodexBarApplet extends Applet.TextIconApplet {
 
     _limitRow(title, value) {
         let percent = this._firstNumber(value, ["usedPercent", "percentUsed", "usagePercent", "used_percent"]);
-        let resetDescription = this._firstValue(value, ["resetDescription"]);
         let reset = this._firstValue(value, ["resetsAt", "resetAt", "reset_at"]);
-        let right = "";
-
-        if (resetDescription) {
-            right = "Resets " + resetDescription;
-        } else if (reset) {
-            right = "Resets " + this._relativeTime(reset);
-        }
+        let right = this._resetLabel(value, reset);
 
         return {
             title: title,
@@ -507,7 +501,7 @@ class CodexBarApplet extends Applet.TextIconApplet {
             title: title,
             percent: percent || 0,
             detail: detail,
-            right: reset ? "Resets " + this._relativeTime(reset) : "",
+            right: this._resetLabel(value, reset),
             note: summary || this._paceNote(stage, delta)
         };
     }
@@ -695,6 +689,54 @@ class CodexBarApplet extends Applet.TextIconApplet {
         return text.charAt(0).toUpperCase() + text.slice(1);
     }
 
+    _pad2(number) {
+        return (number < 10 ? "0" : "") + number;
+    }
+
+    // Always 24h. Formatted by hand rather than through toLocaleTimeString so the
+    // result does not depend on LC_TIME (en_US would render 12h here).
+    _clock24(date) {
+        return this._pad2(date.getHours()) + ":" + this._pad2(date.getMinutes());
+    }
+
+    _sameDay(a, b) {
+        return a.getFullYear() === b.getFullYear()
+            && a.getMonth() === b.getMonth()
+            && a.getDate() === b.getDate();
+    }
+
+    _formatResetAt(value) {
+        let date = new Date(value);
+        if (isNaN(date.getTime())) {
+            return null;
+        }
+
+        let clock = this._clock24(date);
+        if (this._sameDay(date, new Date())) {
+            return clock;
+        }
+
+        return MONTH_NAMES[date.getMonth()] + " " + date.getDate() + ", " + clock;
+    }
+
+    // CodexBar's resetDescription is unreliable: for Claude it arrives unspaced and
+    // already prefixed ("Resets9:10pm(Europe/Madrid)"). Prefer the ISO timestamp and
+    // only fall back to the description, de-duplicating its prefix when we do.
+    _resetLabel(value, reset) {
+        let absolute = reset ? this._formatResetAt(reset) : null;
+        if (absolute) {
+            return "Resets " + absolute;
+        }
+
+        let description = this._firstValue(value, ["resetDescription"]);
+        if (description) {
+            let text = String(description).trim();
+            return /^resets/i.test(text) ? text : "Resets " + text;
+        }
+
+        return reset ? "Resets " + this._relativeTime(reset) : "";
+    }
+
     _relativeUpdated(date) {
         if (!date) {
             return "soon";
@@ -707,11 +749,11 @@ class CodexBarApplet extends Applet.TextIconApplet {
         if (seconds < 3600) {
             return Math.floor(seconds / 60) + "m ago";
         }
-        return date.toLocaleTimeString();
+        return this._clock24(date);
     }
 
     _formatUpdated(date) {
-        return date ? date.toLocaleTimeString() : "never";
+        return date ? this._clock24(date) : "never";
     }
 
     _relativeTime(value) {
