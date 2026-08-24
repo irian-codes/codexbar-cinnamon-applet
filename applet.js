@@ -15,9 +15,15 @@ const ENABLED_PROVIDERS = "enabled";
 const DEFAULT_REFRESH_SECONDS = 60;
 const CLOCK_SCHEMA = "org.cinnamon.desktop.interface";
 const CLOCK_KEY = "clock-use-24h";
+const PERCENT_KEYS = ["usedPercent", "percentUsed", "usagePercent", "used_percent"];
 const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-const PANEL_GAUGE_WIDTH = 28;
-const PANEL_GAUGE_HEIGHT = 16;
+const PANEL_GAUGE_SCALE = 1.5;
+const PANEL_GAUGE_WIDTH = Math.round(28 * PANEL_GAUGE_SCALE);
+const PANEL_GAUGE_HEIGHT = Math.round(16 * PANEL_GAUGE_SCALE);
+const PANEL_GAUGE_LINE_WIDTH = 3.2 * PANEL_GAUGE_SCALE;
+const PANEL_GAUGE_BASELINE_INSET = 2.5 * PANEL_GAUGE_SCALE;
+const PANEL_GAUGE_SIDE_INSET = 3 * PANEL_GAUGE_SCALE;
+const PANEL_GAUGE_TOP_INSET = 4 * PANEL_GAUGE_SCALE;
 
 class CodexBarApplet extends Applet.TextIconApplet {
     constructor(metadata, orientation, panelHeight, instanceId) {
@@ -31,7 +37,10 @@ class CodexBarApplet extends Applet.TextIconApplet {
         this.menuManager.addMenu(this.menu);
 
         this.refreshTimerId = 0;
+        this.refreshTimeoutId = 0;
+        this.refreshProc = null;
         this.refreshing = false;
+        this._destroyed = false;
         this.lastUpdated = null;
         this.lastError = null;
         this.records = [];
@@ -42,8 +51,18 @@ class CodexBarApplet extends Applet.TextIconApplet {
         this.panelGauge = new St.DrawingArea({ style_class: "codexbar-panel-gauge" });
         this.panelGauge.set_size(PANEL_GAUGE_WIDTH, PANEL_GAUGE_HEIGHT);
         this.panelGauge.connect("repaint", Lang.bind(this, this._drawPanelGauge));
-        this._layoutBin.set_child(this.panelGauge);
-        this._layoutBin.show();
+        // Deliberately not _layoutBin: that is the label's bin, and setOrientation
+        // re-applies the empty label, which hides the bin and would take the gauge
+        // with it. See Applet.hideLabel().
+        // add(), not add_actor(): the default fill would stretch the DrawingArea to
+        // the full panel height, and the gauge derives its radius and centre from
+        // that allocation. Matches how Cinnamon adds its own _layoutBin.
+        this.actor.add(this.panelGauge, {
+            x_align: St.Align.MIDDLE,
+            x_fill: false,
+            y_align: St.Align.MIDDLE,
+            y_fill: false
+        });
 
         this.settings = new Settings.AppletSettings(this, metadata.uuid, instanceId);
         this.settings.bind("command-path", "commandPath", this._onSettingsChanged);
@@ -59,28 +78,51 @@ class CodexBarApplet extends Applet.TextIconApplet {
 
         this._watchSystemClockFormat();
 
+        // Rebuilding the shell is deferred until the menu is actually opened, so a
+        // closed menu costs nothing and cannot accumulate separator handlers.
+        this.menuDirty = true;
+        this.menu.connect("open-state-changed", Lang.bind(this, this._onMenuOpenStateChanged));
+
+        this._normalizeSettings();
         this._setLoadingState();
-        this._buildMenu();
         this._refresh();
         this._scheduleRefresh();
     }
 
     on_applet_clicked() {
-        this._buildMenu();
         this.menu.toggle();
     }
 
     on_applet_removed_from_panel() {
+        this._destroyed = true;
         this._clearRefreshTimer();
+        this._clearRefreshTimeout();
+        this._abortRefresh();
         this._unwatchSystemClockFormat();
         this.settings.finalize();
+
+        // Cinnamon only detaches the applet actor; menus it parented into uiGroup
+        // are left behind otherwise.
+        this.menuManager.removeMenu(this.menu);
+        this.menu.destroy();
+    }
+
+    _onMenuOpenStateChanged(menu, open) {
+        if (open && this.menuDirty) {
+            this._buildMenu();
+        }
+    }
+
+    _normalizeSettings() {
+        this.commandPath = this.commandPath || DEFAULT_COMMAND;
+        this.provider = this.provider || DEFAULT_PROVIDER;
+
+        let interval = Number(this.refreshInterval);
+        this.refreshInterval = isNaN(interval) ? DEFAULT_REFRESH_SECONDS : Math.max(15, interval);
     }
 
     _onSettingsChanged() {
-        this.commandPath = this.commandPath || DEFAULT_COMMAND;
-        this.provider = this.provider || DEFAULT_PROVIDER;
-        this.refreshInterval = Math.max(15, Number(this.refreshInterval || DEFAULT_REFRESH_SECONDS));
-        this._applyIconPreference();
+        this._normalizeSettings();
         this._clearRefreshTimer();
         this._refresh();
         this._scheduleRefresh();
@@ -99,6 +141,7 @@ class CodexBarApplet extends Applet.TextIconApplet {
     _setRecords(records) {
         this.records = records || [];
         this.lastUpdated = new Date();
+        this.lastError = null;
         this._syncProviderSettings();
         this._applyRecords();
     }
@@ -119,7 +162,7 @@ class CodexBarApplet extends Applet.TextIconApplet {
     // Providers the user has left ticked. Anything not yet in the list is shown,
     // so a newly enabled provider appears without needing to be ticked first.
     _visibleRecords() {
-        let hidden = {};
+        let hidden = Object.create(null);
         let rows = this.providerRows || [];
         for (let i = 0; i < rows.length; i++) {
             if (rows[i] && rows[i].show === false) {
@@ -163,7 +206,7 @@ class CodexBarApplet extends Applet.TextIconApplet {
             return;
         }
 
-        let previous = {};
+        let previous = Object.create(null);
         let rows = this.providerRows || [];
         for (let i = 0; i < rows.length; i++) {
             if (rows[i]) {
@@ -177,7 +220,7 @@ class CodexBarApplet extends Applet.TextIconApplet {
         }));
 
         if (JSON.stringify(next) !== JSON.stringify(rows)) {
-            this.providerRows = next;
+            // setValue persists; assigning the bound property would persist a second time.
             this.settings.setValue("providers", next);
         }
 
@@ -185,7 +228,15 @@ class CodexBarApplet extends Applet.TextIconApplet {
         for (let i = 0; i < records.length; i++) {
             options[this._providerLabel(records[i])] = this._providerKey(records[i]);
         }
-        this.settings.setOptions("gauge-provider", options);
+
+        // Settings.setOptions compares with != on objects, which is always true for a
+        // fresh literal, and every call rewrites the whole settings file synchronously.
+        // Only call it when the options really changed.
+        let serialized = JSON.stringify(options);
+        if (serialized !== this.gaugeOptionsCache) {
+            this.gaugeOptionsCache = serialized;
+            this.settings.setOptions("gauge-provider", options);
+        }
     }
 
     _applyRecords() {
@@ -214,9 +265,20 @@ class CodexBarApplet extends Applet.TextIconApplet {
             this.set_applet_tooltip(model.tooltip);
         }
 
-        // Tearing the menu down while it is open closes it, so only do a full
-        // rebuild when the tab strip itself has to change.
-        if (this.menu.isOpen && this.bodySection && this._tabsMatchShell(visible)) {
+        this._renderMenu(visible);
+    }
+
+    // Closed menu: mark dirty and do nothing, which avoids both the wasted actor
+    // churn and the separator handlers that addMenuItem leaks per rebuild.
+    // Open menu: rebuild only the body unless the tab strip itself must change,
+    // because a full rebuild destroys whatever the user is interacting with.
+    _renderMenu(visible) {
+        if (!this.menu.isOpen) {
+            this.menuDirty = true;
+            return;
+        }
+
+        if (this.bodySection && this._tabsMatchShell(visible)) {
             this._buildBody();
             this._syncUpdatedLabel();
         } else {
@@ -225,11 +287,12 @@ class CodexBarApplet extends Applet.TextIconApplet {
     }
 
     _setErrorState(message) {
-        this.lastUpdated = new Date();
+        // lastUpdated is deliberately not touched: it marks when the data was last
+        // good, so the popup cannot label stale numbers as fresh.
         this.lastError = message || "Unknown CodexBar error";
         this._setPanelGauge(100, "error");
         this.set_applet_tooltip("CodexBar: " + this.lastError);
-        this._buildMenu();
+        this._renderMenu(this._visibleRecords());
     }
 
     _setPanelGauge(percent, mode) {
@@ -244,14 +307,14 @@ class CodexBarApplet extends Applet.TextIconApplet {
         let percent = this.panelGaugeMode === "loading" ? 0 : this.panelPercent;
         let ratio = Math.max(0, Math.min(1, percent / 100));
         let cx = width / 2;
-        let cy = height - 2.5;
-        let radius = Math.min(width / 2 - 3, height - 4);
+        let cy = height - PANEL_GAUGE_BASELINE_INSET;
+        let radius = Math.min(width / 2 - PANEL_GAUGE_SIDE_INSET, height - PANEL_GAUGE_TOP_INSET);
         let start = Math.PI;
         let end = Math.PI * 2;
         let activeEnd = start + (end - start) * ratio;
 
         cr.setLineCap(Cairo.LineCap.ROUND);
-        cr.setLineWidth(3.2);
+        cr.setLineWidth(PANEL_GAUGE_LINE_WIDTH);
         cr.arc(cx, cy, radius, start, end);
         cr.setSourceRGBA(1, 1, 1, 0.18);
         cr.stroke();
@@ -298,6 +361,46 @@ class CodexBarApplet extends Applet.TextIconApplet {
         }));
     }
 
+    // Without this a hung binary latches `refreshing` true and every later tick
+    // early-returns, leaving the applet stuck on "Refreshing" until Cinnamon restarts.
+    _armRefreshTimeout() {
+        this._clearRefreshTimeout();
+
+        let limit = Math.max(30, Number(this.refreshInterval) * 2 || 120);
+        this.refreshTimeoutId = Mainloop.timeout_add_seconds(limit, Lang.bind(this, function() {
+            this.refreshTimeoutId = 0;
+
+            if (this.refreshing) {
+                this._abortRefresh();
+                this.refreshing = false;
+                this._setErrorState("CodexBar timed out after " + limit + "s");
+            }
+
+            return false;
+        }));
+    }
+
+    _clearRefreshTimeout() {
+        if (this.refreshTimeoutId) {
+            Mainloop.source_remove(this.refreshTimeoutId);
+            this.refreshTimeoutId = 0;
+        }
+    }
+
+    _abortRefresh() {
+        if (!this.refreshProc) {
+            return;
+        }
+
+        try {
+            this.refreshProc.force_exit();
+        } catch (e) {
+            // Already gone; nothing to do.
+        }
+
+        this.refreshProc = null;
+    }
+
     _clearRefreshTimer() {
         if (this.refreshTimerId) {
             Mainloop.source_remove(this.refreshTimerId);
@@ -320,21 +423,36 @@ class CodexBarApplet extends Applet.TextIconApplet {
         }
 
         try {
-            Util.spawnCommandLineAsyncIO(null, Lang.bind(this, function(stdout, stderr, exitCode) {
-                this.refreshing = false;
-
-                let output = stdout || "";
-                if (!output.trim() && stderr) {
-                    this._setErrorState("CodexBar failed: " + stderr.trim());
+            this.refreshProc = Util.spawnCommandLineAsyncIO(null, Lang.bind(this, function(stdout, stderr, exitCode) {
+                // The applet can be removed while a spawn is in flight; finishing here
+                // would write to finalized settings and recreate the deleted config file.
+                if (this._destroyed) {
                     return;
                 }
 
+                this.refreshing = false;
+                this.refreshProc = null;
+                this._clearRefreshTimeout();
+
                 try {
-                    let parsed = JSON.parse(output || "[]");
-                    this._setRecords(Array.isArray(parsed) ? parsed : [parsed]);
+                    let output = stdout || "";
+                    let detail = stderr ? String(stderr).trim() : "";
+
+                    if (!output.trim()) {
+                        this._setErrorState(detail
+                            ? "CodexBar failed: " + detail
+                            : "CodexBar produced no output (exit " + exitCode + ")");
+                    } else if (exitCode !== 0 && exitCode !== undefined && exitCode !== null) {
+                        this._setErrorState("CodexBar exited " + exitCode + (detail ? ": " + detail : ""));
+                    } else {
+                        let parsed = JSON.parse(output);
+                        this._setRecords(Array.isArray(parsed) ? parsed : [parsed]);
+                    }
                 } catch (e) {
-                    let suffix = stderr ? " (" + stderr.trim() + ")" : "";
-                    this._setErrorState("Could not parse CodexBar JSON: " + e.message + suffix);
+                    // Covers JSON.parse and anything thrown while modelling the records.
+                    // Left unguarded, the throw escapes the GJS callback and the applet
+                    // sits on stale data, retrying and failing identically every tick.
+                    this._setErrorState("Could not read CodexBar output: " + e.message);
                 }
 
                 if (manual) {
@@ -343,8 +461,11 @@ class CodexBarApplet extends Applet.TextIconApplet {
             }), {
                 argv: this._usageArgv()
             });
+
+            this._armRefreshTimeout();
         } catch (e) {
             this.refreshing = false;
+            this.refreshProc = null;
             this._setErrorState("Could not run CodexBar: " + e.message);
         }
     }
@@ -372,11 +493,14 @@ class CodexBarApplet extends Applet.TextIconApplet {
 
     _buildMenu() {
         this.menu.removeAll();
-        this.tabButtons = {};
+        this.menuDirty = false;
+        this.tabButtons = Object.create(null);
+        this.tabOrder = [];
 
         let visible = this._visibleRecords();
-        if (visible.length > 1) {
-            this._addTabs(visible);
+        let tabKeys = this._expectedTabKeys(visible);
+        if (tabKeys.length > 1) {
+            this._addTabs(tabKeys, visible);
             this._addSectionSeparator();
         }
 
@@ -404,6 +528,10 @@ class CodexBarApplet extends Applet.TextIconApplet {
             let model = this._modelFromRecords(visible.length > 0 ? [this._activeRecord(visible)] : []);
             this._addHeader(model);
 
+            if (this.lastError) {
+                this._addMessage(this.lastError, "codexbar-error");
+            }
+
             if (model.error) {
                 this._addMessage(model.error, "codexbar-error");
             } else if (model.rows.length === 0) {
@@ -428,15 +556,15 @@ class CodexBarApplet extends Applet.TextIconApplet {
         }
     }
 
-    _addTabs(visible) {
+    _addTabs(tabKeys, visible) {
         let item = new PopupMenu.PopupBaseMenuItem({ reactive: false, style_class: "codexbar-popup-item" });
         let box = new St.BoxLayout({ vertical: false, style_class: "codexbar-tabs" });
 
-        for (let i = 0; i < visible.length; i++) {
-            let key = this._providerKey(visible[i]);
+        for (let i = 0; i < tabKeys.length; i++) {
+            let key = tabKeys[i];
             let active = key === this.activeProvider;
             let button = new St.Button({
-                label: this._providerLabel(visible[i]),
+                label: this._providerLabel(this._recordForProvider(visible, key)),
                 style_class: active ? "codexbar-tab-active" : "codexbar-tab",
                 x_expand: true
             });
@@ -447,6 +575,7 @@ class CodexBarApplet extends Applet.TextIconApplet {
             }));
 
             this.tabButtons[key] = button;
+            this.tabOrder.push(key);
             box.add_actor(button);
         }
 
@@ -455,24 +584,30 @@ class CodexBarApplet extends Applet.TextIconApplet {
     }
 
     _expectedTabKeys(visible) {
-        if (visible.length <= 1) {
-            return [];
+        let keys = [];
+
+        for (let i = 0; i < visible.length; i++) {
+            let key = this._providerKey(visible[i]);
+            if (key && keys.indexOf(key) < 0) {
+                keys.push(key);
+            }
         }
-        return visible.map(Lang.bind(this, function(record) {
-            return this._providerKey(record);
-        }));
+
+        return keys.length > 1 ? keys : [];
     }
 
     _tabsMatchShell(visible) {
         let expected = this._expectedTabKeys(visible);
-        let current = Object.keys(this.tabButtons || {});
+        let current = this.tabOrder || [];
 
         if (expected.length !== current.length) {
             return false;
         }
 
+        // Positional, so a reordered or duplicated provider set forces a rebuild
+        // rather than silently matching.
         for (let i = 0; i < expected.length; i++) {
-            if (current.indexOf(expected[i]) < 0) {
+            if (expected[i] !== current[i]) {
                 return false;
             }
         }
@@ -622,7 +757,6 @@ class CodexBarApplet extends Applet.TextIconApplet {
                 title: "Codex",
                 subtitle: "Waiting for data",
                 headerRight: "",
-                gaugePercent: 0,
                 tooltip: "CodexBar: waiting for data",
                 error: null,
                 rows: [],
@@ -637,7 +771,6 @@ class CodexBarApplet extends Applet.TextIconApplet {
                 title: provider,
                 subtitle: source,
                 headerRight: "!",
-                gaugePercent: 100,
                 tooltip: "CodexBar: " + message,
                 error: message,
                 rows: [],
@@ -646,7 +779,6 @@ class CodexBarApplet extends Applet.TextIconApplet {
             };
         }
 
-        let gaugePercent = this._gaugeLimitPercent(record);
         let rows = this._usageRows(record);
         let extraUsage = this._extraUsage(record);
         let costLines = this._costLines(record);
@@ -655,7 +787,6 @@ class CodexBarApplet extends Applet.TextIconApplet {
             title: provider,
             subtitle: this.refreshing ? "Refreshing..." : "Updated " + this._relativeUpdated(this.lastUpdated),
             headerRight: this.refreshing ? "" : source,
-            gaugePercent: gaugePercent,
             tooltip: this._tooltip(provider, rows, extraUsage),
             error: null,
             rows: rows,
@@ -677,8 +808,16 @@ class CodexBarApplet extends Applet.TextIconApplet {
             rows.push(this._limitRow("Weekly", secondary));
         }
 
-        let windows = this._getPath(record, ["usage", "extraRateWindows"]) || [];
+        let windows = this._getPath(record, ["usage", "extraRateWindows"]);
+        if (!Array.isArray(windows)) {
+            windows = [];
+        }
+
         for (let i = 0; i < windows.length; i++) {
+            if (!windows[i] || typeof windows[i] !== "object") {
+                continue;
+            }
+
             let title = windows[i].title || "Usage";
             let lower = title.toLowerCase();
             if (lower.indexOf("sonnet") >= 0) {
@@ -702,13 +841,13 @@ class CodexBarApplet extends Applet.TextIconApplet {
 
     _gaugeLimitPercent(record) {
         let primary = this._limitWindow(record, "primary");
-        let percent = primary ? this._firstNumber(primary, ["usedPercent", "percentUsed", "usagePercent", "used_percent"]) : null;
+        let percent = primary ? this._firstNumber(primary, PERCENT_KEYS) : null;
         if (percent !== null) {
             return percent;
         }
 
         let secondary = this._limitWindow(record, "secondary");
-        percent = secondary ? this._firstNumber(secondary, ["usedPercent", "percentUsed", "usagePercent", "used_percent"]) : null;
+        percent = secondary ? this._firstNumber(secondary, PERCENT_KEYS) : null;
         return percent === null ? 0 : percent;
     }
 
@@ -735,7 +874,7 @@ class CodexBarApplet extends Applet.TextIconApplet {
     }
 
     _limitRow(title, value) {
-        let percent = this._firstNumber(value, ["usedPercent", "percentUsed", "usagePercent", "used_percent"]);
+        let percent = this._firstNumber(value, PERCENT_KEYS);
         let reset = this._firstValue(value, ["resetsAt", "resetAt", "reset_at"]);
         let right = this._resetLabel(value, reset);
 
@@ -749,7 +888,7 @@ class CodexBarApplet extends Applet.TextIconApplet {
     }
 
     _paceRow(title, value) {
-        let percent = this._firstNumber(value, ["usedPercent", "percentUsed", "usagePercent", "used_percent"]);
+        let percent = this._firstNumber(value, PERCENT_KEYS);
         let reset = this._firstValue(value, ["resetsAt", "resetAt", "reset_at"]);
         let delta = this._firstNumber(value, ["deltaPercent", "delta_percent"]);
         let stage = this._firstValue(value, ["stage"]);
@@ -1050,7 +1189,9 @@ class CodexBarApplet extends Applet.TextIconApplet {
             return /^resets/i.test(text) ? text : "Resets " + text;
         }
 
-        return reset ? "Resets " + this._relativeTime(reset) : "";
+        // No absolute time and no description: _formatResetAt only returns null for
+        // an unparseable value, which _relativeTime would echo back verbatim.
+        return "";
     }
 
     _relativeUpdated(date) {
@@ -1070,26 +1211,6 @@ class CodexBarApplet extends Applet.TextIconApplet {
 
     _formatUpdated(date) {
         return date ? this._formatClock(date) : "never";
-    }
-
-    _relativeTime(value) {
-        let date = new Date(value);
-        if (isNaN(date.getTime())) {
-            return String(value);
-        }
-
-        let minutes = Math.max(0, Math.floor((date.getTime() - Date.now()) / 60000));
-        let days = Math.floor(minutes / 1440);
-        let hours = Math.floor((minutes % 1440) / 60);
-        let mins = minutes % 60;
-
-        if (days > 0) {
-            return "in " + days + "d " + hours + "h";
-        }
-        if (hours > 0) {
-            return "in " + hours + "h " + mins + "m";
-        }
-        return "in " + mins + "m";
     }
 }
 
