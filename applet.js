@@ -279,7 +279,6 @@ class CodexBarApplet extends Applet.TextIconApplet {
         }
 
         let model = this._modelFromRecords(active ? [active] : []);
-        this.lastError = model.error;
 
         // visible.length guards the pre-fetch case: with no records at all the gauge
         // provider is not missing, we simply have nothing yet.
@@ -469,11 +468,25 @@ class CodexBarApplet extends Applet.TextIconApplet {
                         this._setErrorState(detail
                             ? "CodexBar failed: " + detail
                             : "CodexBar produced no output (exit " + exitCode + ")");
-                    } else if (exitCode !== 0 && exitCode !== undefined && exitCode !== null) {
-                        this._setErrorState("CodexBar exited " + exitCode + (detail ? ": " + detail : ""));
                     } else {
+                        // CodexBar exits nonzero when *any* provider fails, yet it still
+                        // prints a record per provider, each carrying its own `error`.
+                        // Keying off the exit code alone threw the whole payload away and
+                        // hid every healthy provider behind one failing one, which is what
+                        // a rate-limited Claude OAuth endpoint (exit 3) looked like. So the
+                        // payload wins whenever it parses, and _modelFromRecords surfaces
+                        // the failure on the affected provider's tab instead.
                         let parsed = JSON.parse(output);
-                        this._setRecords(Array.isArray(parsed) ? parsed : [parsed]);
+                        let records = Array.isArray(parsed) ? parsed : [parsed];
+                        let failed = exitCode !== 0 && exitCode !== undefined && exitCode !== null;
+
+                        if (failed && !this._hasRecordError(records)) {
+                            // Nonzero exit that no record accounts for: report it rather
+                            // than presenting the payload as wholly good.
+                            this._setErrorState("CodexBar exited " + exitCode + (detail ? ": " + detail : ""));
+                        } else {
+                            this._setRecords(records);
+                        }
                     }
                 } catch (e) {
                     // Covers JSON.parse and anything thrown while modelling the records.
@@ -512,6 +525,17 @@ class CodexBarApplet extends Applet.TextIconApplet {
         }
 
         return argv;
+    }
+
+    // A record-level `error` explains a nonzero exit on its own, so the run is
+    // partial rather than broken.
+    _hasRecordError(records) {
+        for (let i = 0; i < (records || []).length; i++) {
+            if (records[i] && records[i].error) {
+                return true;
+            }
+        }
+        return false;
     }
 
     _menuTarget() {
