@@ -81,9 +81,15 @@ Live config: `~/.config/cinnamon/spices/codexbar@local/<instance>.json`.
   included. Treat the parsed JSON as authoritative and let each record's own
   `error` field describe that provider; only fall back to a run-level error when
   the output is empty, unparseable, or the exit code has no record to explain it.
-- `--source oauth` hits Anthropic's usage endpoint directly and gets rate limited
-  under frequent polling. `auto` falls back to the claude.ai API and is the safer
-  default for a panel applet.
+- **On Linux, `oauth` is the only fast Claude source.** `--source web` is macOS
+  only (`selected source requires web support and is only supported on macOS`),
+  so with no cookie path available `auto` falls straight through to the Claude
+  CLI. Measured on this machine: `oauth` ~0.33s, `auto` ~16.9s, `cli` ~16.9s,
+  `web` fails in 10ms. `auto` is therefore ~50x slower, not safer, and it leaves
+  the panel gauge in `loading` for the whole fetch after every reload or login.
+- `oauth` is fast but Anthropic rate limits it intermittently, independent of
+  polling interval. That is a reason to degrade gracefully per provider, not a
+  reason to switch source: the next tick recovers on its own.
 - Record-level errors must not be copied into `lastError`. That field is the
   run-level banner, and `_buildBody` renders it *alongside* the active record's
   `model.error`, so copying one into the other both duplicated the message and
