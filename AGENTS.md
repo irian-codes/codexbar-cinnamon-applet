@@ -72,3 +72,20 @@ Live config: `~/.config/cinnamon/spices/codexbar@local/<instance>.json`.
   height, and the gauge derives its radius and centre from that allocation. Do
   not parent it into `_layoutBin` either, since hiding the label takes the bin's
   children with it.
+
+## CodexBar CLI gotchas
+
+- **A nonzero exit does not mean the payload is useless.** `codexbar usage` exits
+  with the failing provider's error `code` (a rate-limited Claude OAuth endpoint
+  gives `3`) while still printing a record per provider, the healthy ones
+  included. Treat the parsed JSON as authoritative and let each record's own
+  `error` field describe that provider; only fall back to a run-level error when
+  the output is empty, unparseable, or the exit code has no record to explain it.
+- `--source oauth` hits Anthropic's usage endpoint directly and gets rate limited
+  under frequent polling. `auto` falls back to the claude.ai API and is the safer
+  default for a panel applet.
+- Record-level errors must not be copied into `lastError`. That field is the
+  run-level banner, and `_buildBody` renders it *alongside* the active record's
+  `model.error`, so copying one into the other both duplicated the message and
+  left a stale banner on healthy tabs after `_setActiveProvider` (which rebuilds
+  the body without going through `_applyRecords`).
